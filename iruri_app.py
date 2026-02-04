@@ -27,10 +27,6 @@ SPREADSHEET_ID = "18ffTcHQh2zO7kee7S-HYMnbNls8Qb0xrerkjJc0Dsfw"
 APPS_SCRIPT_URL = st.secrets.get("APPS_SCRIPT_URL", "").strip()
 APPS_SCRIPT_TOKEN = st.secrets.get("APPS_SCRIPT_TOKEN", "").strip()
 
-st.write("APPS_SCRIPT_URL:", APPS_SCRIPT_URL[:40] + "...")
-st.write("TOKEN len:", len(APPS_SCRIPT_TOKEN))
-
-
 # -------------------------
 # Paths & limits (Auth DB는 로컬 유지)
 # -------------------------
@@ -1094,4 +1090,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
