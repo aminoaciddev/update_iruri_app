@@ -3,12 +3,15 @@ import sqlite3
 import hashlib
 import uuid
 import requests
+import io
+import os
 from datetime import datetime, timedelta, timezone
 import urllib.parse
 
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+
 
 # -------------------------
 # Page config
@@ -22,7 +25,7 @@ SPREADSHEET_ID = "18ffTcHQh2zO7kee7S-HYMnbNls8Qb0xrerkjJc0Dsfw"
 
 # Apps Script 웹앱 배포 URL (반드시 넣어야 쓰기 가능)
 APPS_SCRIPT_URL = st.secrets.get("APPS_SCRIPT_URL", "").strip()  # secrets에 넣는 걸 추천
-# 예: "https://script.google.com/macros/s/XXXX/exec"
+
 
 # 토큰 쓰고 싶으면 Apps Script REQUIRE_TOKEN=true로 바꾸고 아래도 채우기
 APPS_SCRIPT_TOKEN = st.secrets.get("APPS_SCRIPT_TOKEN", "").strip()
@@ -207,6 +210,7 @@ def compute_major_counts(wrong_list):
 # Login attempt DB
 # -------------------------
 def ensure_auth_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)  # ✅ 폴더 없으면 생성
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("""
@@ -297,8 +301,20 @@ def read_sheet_csv(sheet_name: str) -> pd.DataFrame:
     base = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq"
     params = {"tqx": "out:csv", "sheet": sheet_name}
     url = base + "?" + urllib.parse.urlencode(params)
-    return pd.read_csv(url)
 
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+    r.raise_for_status()
+
+    txt = r.text.strip()
+    if not txt:
+        raise ValueError(f"{sheet_name}: CSV 내용이 비어있음")
+
+    # ✅ 핵심: StringIO로 읽기
+    df = pd.read_csv(
+        io.StringIO(txt),
+        encoding="utf-8",
+    )
+    return df
 # -------------------------
 # Write: Apps Script
 # -------------------------
@@ -606,31 +622,17 @@ def render_student_dashboard(df, ebsi, grammar, summaries, admin_sol, name, grad
     grade_num = extract_first_number_str(grade)
     search_name = re.sub(r"\s+", "", str(name))
 
-    # KPI (학년별 요약시트)
-    summary_df = summaries.get(grade_num, pd.DataFrame())
-    total_cnt, avg_grade, l_val, r_val = "-", "-", "-", "-"
-
-    if not summary_df.empty and "이름_norm" in summary_df.columns:
-        match = summary_df[summary_df["이름_norm"] == search_name]
-        if not match.empty:
-            r = match.iloc[0]
-            total_cnt = _norm_str(r.get("모의고사응시횟수", "-"))
-            avg_grade = _norm_str(r.get("등급평균", "-"))
-
-            l_cols = [c for c in summary_df.columns if "듣기" in str(c)]
-            r_cols = [c for c in summary_df.columns if "독해" in str(c)]
-            if l_cols: l_val = _norm_str(r.get(l_cols[0], "-"))
-            if r_cols: r_val = _norm_str(r.get(r_cols[0], "-"))
-
     suffix = " (미리보기)" if is_preview else ""
-    st.markdown(f"### {name}{suffix}")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("모의고사 응시 횟수", f"{total_cnt}회")
-    k2.metric("듣기영역(1~17번)", l_val)
-    k3.metric("독해영역(18~45번)", r_val)
-    k4.metric("등급 평균", avg_grade)
-
+    h1, h2 = st.columns([3, 1])
+    with h1:
+        st.markdown(f"### {name}{suffix}")
+    with h2:
+        st.markdown(
+            f"<div style='text-align:right; font-size:16px; margin-top:8px;'>학년: <b>{grade}</b></div>",
+            unsafe_allow_html=True
+        )
+    
     me = df[df["응시자"] == name].copy()
     me = me.sort_values(["응시순서_num", "응시순서"], na_position="last")
     taken = me[me["status"] == "응시"].copy()
@@ -648,11 +650,93 @@ def render_student_dashboard(df, ebsi, grammar, summaries, admin_sol, name, grad
         fig.update_xaxes(dtick=1, title="회차(응시순서)")
         st.plotly_chart(fig, use_container_width=True)
 
+    # KPI (학년별 요약시트)
+    summary_df = summaries.get(grade_num, pd.DataFrame())
+    total_cnt, avg_grade, l_val, r_val = "-", "-", "-", "-"
+
+    if not summary_df.empty and "이름_norm" in summary_df.columns:
+        match = summary_df[summary_df["이름_norm"] == search_name]
+        if not match.empty:
+            r = match.iloc[0]
+            total_cnt = _norm_str(r.get("모의고사응시횟수", "-"))
+            avg_grade = _norm_str(r.get("등급평균", "-"))
+
+            l_val = _norm_str(r.get("듣기영역(1~17번)", "-"))
+            r_val = _norm_str(r.get("독해영역(18~45번)", "-"))
+
+
+    st.markdown("""
+    <style>
+    .kpi-container {
+        background-color: #ffffff;
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        border: 2px solid #f0f2f6;
+        box-shadow: 2px 4px 12px rgba(0,0,0,0.05);
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .kpi-label { font-size: 20px; color: #555; margin-bottom: 10px; font-weight: 600; }
+    .kpi-value { font-size: 22px; font-weight: 800; color: #1f77b4; word-break: break-all; }
+
+    .flow-arrow {
+        text-align: center;
+        font-size: 35px;
+        color: #1f77b4;
+        margin: 20px 0;
+        font-weight: bold;
+        line-height: 1;
+    }
+
+    .solution-box {
+        border: 2px solid #1f77b4;
+        border-radius: 15px;
+        padding: 20px;
+        background-color: #f0f8ff;
+        box-shadow: 0 4px 15px rgba(31, 119, 180, 0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    k1, k2, k3, k4 = st.columns(4)
+
+    with k1:
+        st.markdown(
+            f'<div class="kpi-container"><div class="kpi-label">모의고사 응시 횟수</div><div class="kpi-value">{total_cnt}회</div></div>',
+            unsafe_allow_html=True
+        )
+    with k2:
+        st.markdown(
+            f'<div class="kpi-container"><div class="kpi-label">듣기영역(1~17번)</div><div class="kpi-value">{l_val}</div></div>',
+            unsafe_allow_html=True
+        )
+    with k3:
+        st.markdown(
+            f'<div class="kpi-container"><div class="kpi-label">독해영역(18~45번)</div><div class="kpi-value">{r_val}</div></div>',
+            unsafe_allow_html=True
+        )
+    with k4:
+        st.markdown(
+            f'<div class="kpi-container"><div class="kpi-label">등급 평균</div><div class="kpi-value">{avg_grade}</div></div>',
+            unsafe_allow_html=True
+        )
+
+    st.markdown('<div class="flow-arrow">▼</div>', unsafe_allow_html=True)
+
     # 솔루션
     sol_row = admin_sol[admin_sol["name"].astype(str).str.strip() == str(name).strip()].head(1)
     sol_text = _norm_str(sol_row.iloc[0].get("solution", "")) if not sol_row.empty else ""
     st.markdown("#### 🟦 솔루션")
-    st.info(sol_text if sol_text else "작성된 솔루션이 없습니다.")
+    if sol_text.strip() == "":
+        st.markdown('<div class="solution-box" style="color:#999;">작성된 솔루션이 없습니다.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="solution-box">{sol_text}</div>', unsafe_allow_html=True)
+
+
+
 
     st.divider()
 
@@ -787,8 +871,8 @@ def render_student_dashboard(df, ebsi, grammar, summaries, admin_sol, name, grad
                     st.caption("grammar_info에 매핑된 '정답개념' 데이터가 부족해서 키워드를 만들 수 없습니다.")
                 else:
                     top = pd.Series(cats).value_counts().head(8)
-                    st.write("**틀린 문법 개념 키워드(상위):**")
-                    st.write(" · ".join([f"{idx}({int(val)})" for idx, val in top.items()]))
+                    st.write( "**틀린 문법 개념 키워드(상위):** "  + " · ".join([f"{idx}({int(val)})" for idx, val in top.items()]))
+
 
 # -------------------------
 # Admin dashboard
